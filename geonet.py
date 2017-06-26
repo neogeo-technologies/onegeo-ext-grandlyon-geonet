@@ -4,18 +4,17 @@ from django.http import HttpResponse
 from neogeo_xml_utils import ObjToXML
 from urllib.parse import urlparse, parse_qsl
 from datetime import datetime
+import re
 
 
 class Plugin(AbstractPlugin):
 
     INDEX = 'geonet'
     FROM_TO = (0, 10)
-
     TYPE = (('dataset', 'Série de données'),
             ('nonGeographicDataset', 'Jeux de données non géographiques'),
             ('series', 'Ensemble de séries de données'),
             ('service', 'Service'))
-
     INSPIRE_THEME = (
         ('ac', 'Conditions atmosphériques'),
         ('ad', 'Zones de gestion, de restriction ou de '
@@ -38,30 +37,27 @@ class Plugin(AbstractPlugin):
         ('so', 'Sols'),
         ('tn', 'Réseaux de transport'),
         ('us', "Services d'utilité publique et services publics"))
-
-    CATEGORIES =(('accessibilite', 'Accessibilité'),
-                 ('citoyennete', 'Citoyenneté'),
-                 ('culture', 'Culture'),
-                 ('environnement', 'Environnement'),
-                 ('equipements', 'Équipements'),
-                 ('imagerie', 'Imagerie'),
-                 ('limitesadministratives', 'Limites administratives'),
-                 ('localisation', 'Localisation'),
-                 ('occupationdusol', 'Occupation du sol'),
-                 ('services', 'Services'),
-                 ('transport', 'Transport'),
-                 ('urbanisme', 'Urbanisme'))
-
+    CATEGORIES = (('accessibilite', 'Accessibilité'),
+                  ('citoyennete', 'Citoyenneté'),
+                  ('culture', 'Culture'),
+                  ('environnement', 'Environnement'),
+                  ('equipements', 'Équipements'),
+                  ('imagerie', 'Imagerie'),
+                  ('limitesadministratives', 'Limites administratives'),
+                  ('localisation', 'Localisation'),
+                  ('occupationdusol', 'Occupation du sol'),
+                  ('services', 'Services'),
+                  ('transport', 'Transport'),
+                  ('urbanisme', 'Urbanisme'))
 
     def __init__(self, config):
         super().__init__(config)
 
-        self.qs = [
-            ('any', 'Texte à rechercher', 'string'),
-            ('fast', "Activer le mode 'fast'", 'boolean'),
-            ('from', 'Index du premier document retourné', 'integer'),
-            ('to', 'Index du dernier document retourné', 'integer'),
-            ('type', 'Filtrer sur le type de resource', 'string')]
+        self.qs = [('any', 'Texte à rechercher', 'string'),
+                   ('fast', "Activer le mode 'fast'", 'boolean'),
+                   ('from', 'Index du premier document retourné', 'integer'),
+                   ('to', 'Index du dernier document retourné', 'integer'),
+                   ('type', 'Filtrer sur le type de resource', 'string')]
 
         self.opts = {'any': '',
                      'fast': False,
@@ -88,13 +84,22 @@ class Plugin(AbstractPlugin):
                          'types': {'type': []}}
 
     def input(self, **params):
+
         self.opts.update(params)
         self.opts['fast'] = self.opts['fast'] == 'true' and True
         if int(self.opts['from']) > int(self.opts['to']):
             self.opts['from'] = self.FROM_TO[0]
             self.opts['to'] = self.FROM_TO[1]
 
-        return {
+        # TODO: Fix origin.source.mode / origin.source.type
+
+        painless_script = (
+            "if (params['_source']['origin']['source']['mode'] == 'wfs') {"
+            "return doc['origin.resource.metadata_url'].value}"
+            "else if (params['_source']['origin']['source']['type'] == 'geonet') {"
+            "return doc['origin.uuid'].value}")
+
+        query = {
             'size': 0,
             'from': 0,
             'query': {
@@ -105,11 +110,22 @@ class Plugin(AbstractPlugin):
                             'operator': 'or',
                             'fuzziness': 0.7,
                             'fields': ['properties.*']}}]}},
-            'aggregations': {
+            'aggs': {
                 'metadata': {
                     'terms': {
                         'size': 999,
-                        'field': 'origin.resource.metadata_url'}}}}
+                        'order': {
+                            'score': 'desc'},
+                        'script': {
+                            'lang': 'painless',
+                            'inline': painless_script}},
+                    'aggs': {
+                        'score': {
+                            'avg': {
+                                'script': '_score'}}}}}}
+        import json
+        print(json.dumps(query))
+        return query
 
     def output(self, data, **params):
         count = 0
@@ -212,6 +228,8 @@ class Plugin(AbstractPlugin):
             # types/type
             update_summary('types', 'type', type, label=dict(self.TYPE)[type])
 
+        # End update_metadata()
+
         if not self.opts['any']:
             body = {'_source': ['raw_data', 'origin.resource.name'],
                     'from': self.opts['from'],
@@ -230,11 +248,15 @@ class Plugin(AbstractPlugin):
                 if i > int(self.opts['to']):
                     break
 
+                try:
+                    uuid = dict(parse_qsl(urlparse(bucket['key']).query))['ID']
+                except:
+                    uuid = bucket['key']
+
                 body = {'_source': ['raw_data', 'origin.resource.name'],
                         'query': {
                             'match': {
-                                'origin.uuid': dict(parse_qsl(urlparse(
-                                                    bucket['key']).query))['ID']}}}
+                                'origin.uuid': uuid}}}
 
                 res = elastic_conn.search(index=self.INDEX, body=body)
 
@@ -249,13 +271,14 @@ class Plugin(AbstractPlugin):
 
         self._summary['@count'] = str(count)
 
-        data = {'response': {'@from': str(self.opts['from']),
-                             '@to': str(int(self.opts['from']) + count),
-                             'summary': self._summary,
-                             'metadata': metadata}}
+        data = {'response': {
+                    '@from': str(self.opts['from']),
+                    '@to': str(int(self.opts['from']) + count - 1),
+                    'summary': self._summary,
+                    'metadata': metadata}}
 
-        return HttpResponse(ObjToXML(data).tostring(),
-                            content_type='application/xml')
+        return HttpResponse(
+                    ObjToXML(data).tostring(), content_type='application/xml')
 
 
 plugin = Plugin
