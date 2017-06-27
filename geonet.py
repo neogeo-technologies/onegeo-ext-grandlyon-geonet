@@ -1,16 +1,17 @@
 from ..elasticsearch_wrapper import elastic_conn
 from . import AbstractPlugin
+from datetime import datetime
 from django.http import HttpResponse
 from neogeo_xml_utils import ObjToXML
+from pathlib import Path
 from urllib.parse import urlparse, parse_qsl
-from datetime import datetime
-import re
 
 
 class Plugin(AbstractPlugin):
 
-    INDEX = 'geonet'
-    FROM_TO = (0, 10)
+    INDEX = Path(__file__).stem
+    FROM = 0
+    TO = 9
     TYPE = (('dataset', 'Série de données'),
             ('nonGeographicDataset', 'Jeux de données non géographiques'),
             ('series', 'Ensemble de séries de données'),
@@ -61,8 +62,8 @@ class Plugin(AbstractPlugin):
 
         self.opts = {'any': '',
                      'fast': False,
-                     'from': self.FROM_TO[0],
-                     'to': self.FROM_TO[1],
+                     'from': self.FROM,
+                     'to': self.TO,
                      'type': None}
 
         self._summary = {'categories': {'category': []},
@@ -87,9 +88,12 @@ class Plugin(AbstractPlugin):
 
         self.opts.update(params)
         self.opts['fast'] = self.opts['fast'] == 'true' and True
-        if int(self.opts['from']) > int(self.opts['to']):
-            self.opts['from'] = self.FROM_TO[0]
-            self.opts['to'] = self.FROM_TO[1]
+
+        self.opts['from'] = int(self.opts['from'])
+        self.opts['to'] = int(self.opts['to'])
+        if self.opts['from'] > self.opts['to']:
+            self.opts['from'] = self.FROM
+            self.opts['to'] = self.TO
 
         # TODO: Fix origin.source.mode / origin.source.type
 
@@ -101,7 +105,6 @@ class Plugin(AbstractPlugin):
 
         query = {
             'size': 0,
-            'from': 0,
             'query': {
                 'bool': {
                     'should': [{
@@ -112,19 +115,18 @@ class Plugin(AbstractPlugin):
                             'fields': ['properties.*']}}]}},
             'aggs': {
                 'metadata': {
+                    'aggs': {
+                        'avg_score': {
+                            'avg': {
+                                'script': '_score'}}},
                     'terms': {
-                        'size': 999,
                         'order': {
-                            'score': 'desc'},
+                            'avg_score': 'desc'},
                         'script': {
                             'lang': 'painless',
-                            'inline': painless_script}},
-                    'aggs': {
-                        'score': {
-                            'avg': {
-                                'script': '_score'}}}}}}
-        import json
-        print(json.dumps(query))
+                            'inline': painless_script},
+                        'size': 9999999}}}}
+
         return query
 
     def output(self, data, **params):
@@ -146,15 +148,16 @@ class Plugin(AbstractPlugin):
                 metadata.append(data)
 
             # Puis m-à-j des éléments de <summary> lorsque cela est possible.
-            def update_summary(parent, key, value, **attrs):
-                if value not in (key['@name'] for key in self._summary[parent][key]):
-                    res = {'@name': value, '@count': '1'}
+
+            def update_summary(parent, e, name, **attrs):
+                if name not in (k['@name'] for k in self._summary[parent][e]):
+                    res = {'@name': name, '@count': '1'}
                     for k, v in attrs.items():
                         res['@{0}'.format(k)] = v
-                    self._summary[parent][key].append(res)
+                    self._summary[parent][e].append(res)
 
-                for d in self._summary[parent][key]:
-                    if d['@name'] == value:
+                for d in self._summary[parent][e]:
+                    if d['@name'] == name:
                         d['@count'] = int(d['@count'])
                         d['@count'] += 1
                         d['@count'] = str(d['@count'])
@@ -172,12 +175,14 @@ class Plugin(AbstractPlugin):
 
             # createDateYears/createDateYear
             val = data['info']['createDate']
-            date = datetime.strptime(val, "%Y-%m-%dT%H:%M:%S")
+            date = datetime.strptime(val, '%Y-%m-%dT%H:%M:%S')
             update_summary('createDateYears', 'createDateYear', str(date.year))
 
-            # denominators/denominator TODO
+            # denominators/denominator
+            # TODO
 
-            # formats/format TODO
+            # formats/format
+            # TODO
 
             def update_keyword(val):
                 update_summary('keywords', 'keyword', val)
@@ -209,7 +214,8 @@ class Plugin(AbstractPlugin):
                         update_summary('licence', 'useLimitation',
                                        sub[k]['CharacterString'])
 
-            # maintenanceAndUpdateFrequencies/maintenanceAndUpdateFrequency TODO
+            # maintenanceAndUpdateFrequencies/maintenanceAndUpdateFrequency
+            # TODO
 
             # orgNames/orgName
             for val in data['responsibleParty']:
@@ -217,13 +223,17 @@ class Plugin(AbstractPlugin):
                     update_summary('orgNames', 'orgName',
                                    val['organisationName'])
 
-            # resolutions/resolution TODO
+            # resolutions/resolution
+            # TODO
 
-            # serviceTypes/serviceType TODO
+            # serviceTypes/serviceType
+            # TODO
 
-            # spatialRepresentationTypes/spatialRepresentationType TODO
+            # spatialRepresentationTypes/spatialRepresentationType
+            # TODO
 
-            # status/status TODO
+            # status/status
+            # TODO
 
             # types/type
             update_summary('types', 'type', type, label=dict(self.TYPE)[type])
@@ -231,10 +241,15 @@ class Plugin(AbstractPlugin):
         # End update_metadata()
 
         if not self.opts['any']:
-            body = {'_source': ['raw_data', 'origin.resource.name'],
-                    'from': self.opts['from'],
-                    'query': {'match_all': {}},
-                    'size': self.opts['to']}
+            body = {'from': self.opts['from'],
+                    'size': self.opts['to'] - self.opts['from'] + 1,
+                    'query': {
+                        'bool': {
+                            'filter': [{
+                                'term': {
+                                    'origin.source.type': 'geonet'}}],
+                            'must': [{
+                                'match_all': {}}]}}}
 
             res = elastic_conn.search(index=self.INDEX, body=body)
             for hit in res['hits']['hits']:
@@ -242,7 +257,8 @@ class Plugin(AbstractPlugin):
                 count += 1
 
         else:
-            for i, bucket in enumerate(data['aggregations']['metadata']['buckets']):
+            buckets = data['aggregations']['metadata']['buckets']
+            for i, bucket in enumerate(buckets):
                 if i < int(self.opts['from']):
                     continue
                 if i > int(self.opts['to']):
@@ -253,7 +269,9 @@ class Plugin(AbstractPlugin):
                 except:
                     uuid = bucket['key']
 
-                body = {'_source': ['raw_data', 'origin.resource.name'],
+                body = {'_source': [
+                            'raw_data',
+                            'origin.resource.name'],
                         'query': {
                             'match': {
                                 'origin.uuid': uuid}}}
@@ -273,7 +291,7 @@ class Plugin(AbstractPlugin):
 
         data = {'response': {
                     '@from': str(self.opts['from']),
-                    '@to': str(int(self.opts['from']) + count - 1),
+                    '@to': str(self.opts['to']),
                     'summary': self._summary,
                     'metadata': metadata}}
 
