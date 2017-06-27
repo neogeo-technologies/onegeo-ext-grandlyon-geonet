@@ -139,8 +139,6 @@ class Plugin(AbstractPlugin):
         metadata = []
 
         def update_metadata(hit):
-
-            type = hit['_source']['origin']['resource']['name']
             data = hit['_source']['raw_data']
 
             if self.opts['fast']:
@@ -241,7 +239,9 @@ class Plugin(AbstractPlugin):
             # TODO
 
             # types/type
-            update_summary('types', 'type', type, label=dict(self.TYPE)[type])
+            resource_type = hit['_source']['origin']['resource']['name']
+            update_summary('types', 'type', resource_type,
+                           label=dict(self.TYPE)[resource_type])
 
         # End update_metadata()
 
@@ -267,7 +267,7 @@ class Plugin(AbstractPlugin):
                 try:
                     # Il serait peut-être plus élégant d'effectuer ce parsing
                     # dans le script painless envoyée à Elasticsearch au
-                    # moment de la requête (Cf. ligne 107)
+                    # moment de la requête (Cf. ligne 105)
                     uuid = dict(parse_qsl(urlparse(bucket['key']).query))['ID']
                 except:
                     uuid = bucket['key']
