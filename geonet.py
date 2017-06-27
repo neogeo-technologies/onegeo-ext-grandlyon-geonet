@@ -57,12 +57,14 @@ class Plugin(AbstractPlugin):
         self.qs = [('any', 'Texte à rechercher', 'string'),
                    ('fast', "Activer le mode 'fast'", 'boolean'),
                    ('from', 'Index du premier document retourné', 'integer'),
+                   ('summary', "Afficher le bloc <summary>", 'boolean'),
                    ('to', 'Index du dernier document retourné', 'integer'),
                    ('type', 'Filtrer sur le type de resource', 'string')]
 
         self.opts = {'any': '',
                      'fast': False,
                      'from': self.FROM,
+                     'summary': True,
                      'to': self.TO,
                      'type': None}
 
@@ -87,7 +89,8 @@ class Plugin(AbstractPlugin):
     def input(self, **params):
 
         self.opts.update(params)
-        self.opts['fast'] = self.opts['fast'] == 'true' and True
+        self.opts['fast'] = self.opts['fast'] == 'true' and True or False
+        self.opts['summary'] = self.opts['summary'] == 'true' and True or False
 
         # C'est pas très beau...
         self.opts['from'] = int(self.opts['from'])
@@ -96,10 +99,8 @@ class Plugin(AbstractPlugin):
             self.opts['from'] = self.FROM
             self.opts['to'] = self.TO
 
-        # TODO: Fix origin.source.mode / origin.source.type
-
         painless_script = (
-            "if (params['_source']['origin']['source']['mode'] == 'wfs') {"
+            "if (params['_source']['origin']['source']['type'] == 'wfs') {"
             "return doc['origin.resource.metadata_url'].value}"
             "else if (params['_source']['origin']['source']['type'] == 'geonet') {"
             "return doc['origin.uuid'].value}")
@@ -260,15 +261,15 @@ class Plugin(AbstractPlugin):
         else:
             buckets = data['aggregations']['metadata']['buckets']
             for i, bucket in enumerate(buckets):
-                if i < int(self.opts['from']):
+                if i < self.opts['from']:
                     continue
-                if i > int(self.opts['to']):
+                if i > self.opts['to']:
                     break
 
                 try:
                     # Il serait peut-être plus élégant d'effectuer ce parsing
                     # dans le script painless envoyée à Elasticsearch au
-                    # moment de la requête (Cf. ligne 101)
+                    # moment de la requête (Cf. ligne 102)
                     uuid = dict(parse_qsl(urlparse(bucket['key']).query))['ID']
                 except:
                     uuid = bucket['key']
@@ -299,8 +300,10 @@ class Plugin(AbstractPlugin):
         data = {'response': {
                     '@from': str(self.opts['from']),
                     '@to': str(self.opts['to']),
-                    'metadata': metadata,
-                    'summary': self._summary}}
+                    'metadata': metadata}}
+
+        if self.opts['summary']:
+            data['response'].update({'summary': self._summary})
 
         return HttpResponse(
                     ObjToXML(data).tostring(), content_type='application/xml')
