@@ -1,5 +1,6 @@
 from ..elasticsearch_wrapper import elastic_conn
 from . import AbstractPlugin
+from ast import literal_eval
 from datetime import datetime
 from django.http import HttpResponse
 from neogeo_xml_utils import ObjToXML
@@ -54,12 +55,12 @@ class Plugin(AbstractPlugin):
     def __init__(self, config):
         super().__init__(config)
 
-        self.qs = [('any', 'Texte à rechercher', 'string'),
-                   ('fast', "Activer le mode 'fast'", 'boolean'),
-                   ('from', 'Index du premier document retourné', 'integer'),
-                   ('summary', "Afficher le bloc <summary>", 'boolean'),
-                   ('to', 'Index du dernier document retourné', 'integer'),
-                   ('type', 'Filtrer sur le type de resource', 'string')]
+        self.qs = [('any', 'Texte à rechercher', str),
+                   ('fast', "Activer le mode 'fast'", bool),
+                   ('from', 'Index du premier document retourné', int),
+                   ('summary', "Afficher le bloc <summary>", bool),
+                   ('to', 'Index du dernier document retourné', int),
+                   ('type', 'Filtrer sur le type de resource', str)]
 
         self.opts = {'any': '',
                      'fast': False,
@@ -88,13 +89,17 @@ class Plugin(AbstractPlugin):
 
     def input(self, **params):
 
-        self.opts.update(params)
-        self.opts['fast'] = self.opts['fast'] == 'true' and True or False
-        self.opts['summary'] = self.opts['summary'] == 'true' and True or False
-
-        # C'est pas très beau...
-        self.opts['from'] = int(self.opts['from'])
-        self.opts['to'] = int(self.opts['to'])
+        self.opts['any'] = params['any']
+        self.opts['fast'] = (
+            'fast' in params and params['fast'] == 'true') and True or False
+        self.opts['summary'] = (
+            'summary' in params and params['summary']) == 'true' and True or False
+        # Ce n'est pas très beau...
+        try:
+            self.opts['from'] = int(params['from'])
+            self.opts['to'] = int(params['to'])
+        except:
+            pass
         if self.opts['from'] > self.opts['to']:
             self.opts['from'] = self.FROM
             self.opts['to'] = self.TO
@@ -259,20 +264,26 @@ class Plugin(AbstractPlugin):
                 count += 1
 
         else:
-            buckets = data['aggregations']['metadata']['buckets']
-            for i, bucket in enumerate(buckets):
+            uuid_list = []
+            for bucket in data['aggregations']['metadata']['buckets']:
+                try:
+                    # Il serait peut-être plus élégant d'effectuer ce parsing
+                    # dans le script painless envoyée à Elasticsearch au
+                    # moment de la requête (Cf. ligne 107)
+                    uuid = dict(parse_qsl(urlparse(bucket['key']).query))['ID']
+                except:
+                    uuid = bucket['key']
+                # Et de gérer les doublons au moment même de la requête...
+                if uuid not in uuid_list:
+                    # Pas de doublon, l'ordre du score est conservé,
+                    # il n'est donc pas nécesssaire de le vérifier ici.
+                    uuid_list.append(uuid)
+
+            for i, uuid in enumerate(uuid_list):
                 if i < self.opts['from']:
                     continue
                 if i > self.opts['to']:
                     break
-
-                try:
-                    # Il serait peut-être plus élégant d'effectuer ce parsing
-                    # dans le script painless envoyée à Elasticsearch au
-                    # moment de la requête (Cf. ligne 102)
-                    uuid = dict(parse_qsl(urlparse(bucket['key']).query))['ID']
-                except:
-                    uuid = bucket['key']
 
                 body = {'_source': [
                             'raw_data',
@@ -289,7 +300,7 @@ class Plugin(AbstractPlugin):
                     import warnings
                     warnings.warn('Duplicate UUID.')
                     # Ce cas ne devrait JAMAIS arriver...
-                    # Par défaut, l'on retourne le premier élément...
+                    # Par défaut, on retourne uniquement le premier élément
 
                 hit = res['hits']['hits'][0]
                 update_metadata(hit)
