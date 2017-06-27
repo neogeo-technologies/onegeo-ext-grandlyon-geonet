@@ -89,6 +89,7 @@ class Plugin(AbstractPlugin):
         self.opts.update(params)
         self.opts['fast'] = self.opts['fast'] == 'true' and True
 
+        # C'est pas très beau...
         self.opts['from'] = int(self.opts['from'])
         self.opts['to'] = int(self.opts['to'])
         if self.opts['from'] > self.opts['to']:
@@ -265,6 +266,9 @@ class Plugin(AbstractPlugin):
                     break
 
                 try:
+                    # Il serait peut-être plus élégant d'effectuer ce parsing
+                    # dans le script painless envoyée à Elasticsearch au
+                    # moment de la requête (Cf. ligne 101)
                     uuid = dict(parse_qsl(urlparse(bucket['key']).query))['ID']
                 except:
                     uuid = bucket['key']
@@ -281,7 +285,10 @@ class Plugin(AbstractPlugin):
                 if len(res['hits']['hits']) == 0:
                     continue
                 if len(res['hits']['hits']) > 1:
-                    raise Exception('Duplicate uuid.')
+                    import warnings
+                    warnings.warn('Duplicate UUID.')
+                    # Ce cas ne devrait JAMAIS arriver...
+                    # Par défaut, l'on retourne le premier élément...
 
                 hit = res['hits']['hits'][0]
                 update_metadata(hit)
@@ -292,8 +299,8 @@ class Plugin(AbstractPlugin):
         data = {'response': {
                     '@from': str(self.opts['from']),
                     '@to': str(self.opts['to']),
-                    'summary': self._summary,
-                    'metadata': metadata}}
+                    'metadata': metadata,
+                    'summary': self._summary}}
 
         return HttpResponse(
                     ObjToXML(data).tostring(), content_type='application/xml')
