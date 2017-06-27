@@ -1,6 +1,5 @@
 from ..elasticsearch_wrapper import elastic_conn
 from . import AbstractPlugin
-from ast import literal_eval
 from datetime import datetime
 from django.http import HttpResponse
 from neogeo_xml_utils import ObjToXML
@@ -65,7 +64,6 @@ class Plugin(AbstractPlugin):
         self.opts = {'any': '',
                      'fast': False,
                      'from': self.FROM,
-                     'summary': True,
                      'to': self.TO,
                      'type': None}
 
@@ -89,14 +87,14 @@ class Plugin(AbstractPlugin):
 
     def input(self, **params):
 
-        self.opts['any'] = params['any']
-        self.opts['fast'] = (
-            'fast' in params and params['fast'] == 'true') and True or False
-        self.opts['summary'] = (
-            'summary' in params and params['summary']) == 'true' and True or False
-        # Ce n'est pas très beau...
+        self.opts['any'] = ('any' in params) and params['any']
+        self.opts['fast'] = ('fast' in params and params['fast'] != 'false')
+
         try:
             self.opts['from'] = int(params['from'])
+        except:
+            pass
+        try:
             self.opts['to'] = int(params['to'])
         except:
             pass
@@ -311,10 +309,8 @@ class Plugin(AbstractPlugin):
         data = {'response': {
                     '@from': str(self.opts['from']),
                     '@to': str(self.opts['to']),
-                    'metadata': metadata}}
-
-        if self.opts['summary']:
-            data['response'].update({'summary': self._summary})
+                    'metadata': metadata,
+                    'summary': self._summary}}
 
         return HttpResponse(
                     ObjToXML(data).tostring(), content_type='application/xml')
