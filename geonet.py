@@ -54,12 +54,12 @@ class Plugin(AbstractPlugin):
     def __init__(self, config):
         super().__init__(config)
 
-        self.qs = [('any', 'Texte à rechercher', str),
-                   ('fast', "Activer le mode 'fast'", bool),
-                   ('from', 'Index du premier document retourné', int),
-                   ('summary', "Afficher le bloc <summary>", bool),
-                   ('to', 'Index du dernier document retourné', int),
-                   ('type', 'Filtrer sur le type de resource', str)]
+        self.qs = [('any', 'Texte à rechercher', 'string'),
+                   ('fast', "Activer le mode 'fast'", 'boolean'),
+                   ('from', 'Index du premier document retourné', 'integer'),
+                   ('summary', 'Afficher le bloc <summary>', 'boolean'),
+                   ('to', 'Index du dernier document retourné', 'interger'),
+                   ('type', 'Filtrer sur le type de resource', 'string')]
 
         self.opts = {'any': '',
                      'fast': False,
