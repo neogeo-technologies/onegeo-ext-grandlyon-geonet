@@ -5,6 +5,16 @@ from django.http import HttpResponse
 from neogeo_xml_utils import ObjToXML
 from pathlib import Path
 from urllib.parse import urlparse, parse_qsl
+import re
+
+
+def group_by(seqs, i=0, merge=True):
+    d = dict()
+    for seq in seqs:
+        k = seq[i]
+        v = d.get(k, tuple()) + (seq[:i] + seq[i + 1:] if merge else (seq[:i] + seq[i + 1:]))
+        d.update({k: v})
+    return d
 
 
 class Plugin(AbstractPlugin):
@@ -51,13 +61,12 @@ class Plugin(AbstractPlugin):
                   ('transport', 'Transport'),
                   ('urbanisme', 'Urbanisme'))
 
-    def __init__(self, config):
-        super().__init__(config)
+    def __init__(self, *args):
+        super().__init__(*args)
 
         self.qs = [('any', 'Texte à rechercher', 'string'),
                    ('fast', "Activer le mode 'fast'", 'boolean'),
                    ('from', 'Index du premier document retourné', 'integer'),
-                   ('summary', 'Afficher le bloc <summary>', 'boolean'),
                    ('to', 'Index du dernier document retourné', 'interger'),
                    ('type', 'Filtrer sur le type de resource', 'string')]
 
@@ -86,6 +95,12 @@ class Plugin(AbstractPlugin):
                          'types': {'type': []}}
 
     def input(self, **params):
+
+        text_properties = ()
+        for _, columns in self.columns_by_index.items():
+            for typ, col in group_by(columns, i=1).items():
+                if typ == 'text':
+                    text_properties += col
 
         self.opts['any'] = ('any' in params) and params['any']
         self.opts['fast'] = ('fast' in params and params['fast'] != 'false')
@@ -117,7 +132,8 @@ class Plugin(AbstractPlugin):
                             'query': self.opts['any'],
                             'operator': 'or',
                             'fuzziness': 0.7,
-                            'fields': ['properties.*']}}]}},
+                            'fields': ['properties.{0}'.format(p)
+                                       for p in text_properties]}}]}},
             'aggs': {
                 'metadata': {
                     'aggs': {
@@ -214,8 +230,10 @@ class Plugin(AbstractPlugin):
                     for k in ('useLimitation', 'otherConstraints'):
                         if k not in sub:
                             continue
-                        update_summary('licence', 'useLimitation',
-                                       sub[k]['CharacterString'])
+                        val = sub[k]['CharacterString']
+                        # if not re.match('^(\w+\s*)+$', val):
+                        #     continue
+                        update_summary('licence', 'useLimitation', val)
 
             # maintenanceAndUpdateFrequencies/maintenanceAndUpdateFrequency
             # TODO
