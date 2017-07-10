@@ -1,18 +1,20 @@
-from ..elasticsearch_wrapper import elastic_conn
 from . import AbstractPlugin
+from ..elasticsearch_wrapper import elastic_conn
 from datetime import datetime
 from django.http import HttpResponse
 from neogeo_xml_utils import ObjToXML
 from pathlib import Path
-from urllib.parse import urlparse, parse_qsl
 import re
+from urllib.parse import parse_qsl
+from urllib.parse import urlparse
 
 
 def group_by(seqs, i=0, merge=True):
     d = dict()
     for seq in seqs:
         k = seq[i]
-        v = d.get(k, tuple()) + (seq[:i] + seq[i + 1:] if merge else (seq[:i] + seq[i + 1:]))
+        v = d.get(k, tuple()) + (seq[:i] + seq[i + 1:]
+                                 if merge else (seq[:i] + seq[i + 1:]))
         d.update({k: v})
     return d
 
@@ -61,8 +63,8 @@ class Plugin(AbstractPlugin):
                   ('transport', 'Transport'),
                   ('urbanisme', 'Urbanisme'))
 
-    def __init__(self, *args):
-        super().__init__(*args)
+    def __init__(self, config, contexts):
+        super().__init__(config, contexts)
 
         self.qs = [('any', 'Texte à rechercher', 'string'),
                    ('fast', "Activer le mode 'fast'", 'boolean'),
@@ -78,19 +80,19 @@ class Plugin(AbstractPlugin):
 
         self._summary = {'categories': {'category': []},
                          'createDateYears': {'createDateYear': []},
-                         'denominators': {'denominator': []},
+                         # 'denominators': {'denominator': []},
                          'formats': {'format': []},
                          'inspireThemes': {'inspireTheme': []},
                          'inspireThemesWithAc': {'inspireThemeWithAc': []},
                          'keywords': {'keyword': []},
                          'licence': {'useLimitation': []},
-                         'maintenanceAndUpdateFrequencies': {
-                                'maintenanceAndUpdateFrequency': []},
+                         # 'maintenanceAndUpdateFrequencies': {
+                         #     'maintenanceAndUpdateFrequency': []},
                          'orgNames': {'orgName': []},
-                         'resolutions': {'resolution': []},
-                         'serviceTypes': {'serviceType': []},
-                         'spatialRepresentationTypes': {
-                             'spatialRepresentationType': []},
+                         # 'resolutions': {'resolution': []},
+                         # 'serviceTypes': {'serviceType': []},
+                         # 'spatialRepresentationTypes': {
+                         #     'spatialRepresentationType': []},
                          'status': {'status': []},
                          'types': {'type': []}}
 
@@ -102,16 +104,17 @@ class Plugin(AbstractPlugin):
                 if typ == 'text':
                     text_properties += col
 
-        self.opts['any'] = ('any' in params) and params['any']
+        self.opts['any'] = ('any' in params) and params['any'] or None
         self.opts['fast'] = ('fast' in params and params['fast'] != 'false')
+        self.opts['type'] = ('type' in params) and params['type'] or None
 
         try:
             self.opts['from'] = int(params['from'])
-        except:
+        except Exception:
             pass
         try:
             self.opts['to'] = int(params['to'])
-        except:
+        except Exception:
             pass
         if self.opts['from'] > self.opts['to']:
             self.opts['from'] = self.FROM
@@ -126,14 +129,7 @@ class Plugin(AbstractPlugin):
         query = {
             'size': 0,
             'query': {
-                'bool': {
-                    'should': [{
-                        'multi_match': {
-                            'query': self.opts['any'],
-                            'operator': 'or',
-                            'fuzziness': 0.7,
-                            'fields': ['properties.{0}'.format(p)
-                                       for p in text_properties]}}]}},
+                'bool': {}},
             'aggs': {
                 'metadata': {
                     'aggs': {
@@ -147,6 +143,26 @@ class Plugin(AbstractPlugin):
                             'lang': 'painless',
                             'inline': painless_script},
                         'size': 9999999}}}}
+
+        if self.opts['any']:
+            query['query']['bool'].update({
+                'must': {
+                    'multi_match': {
+                        'query': self.opts['any'],
+                        'operator': 'or',
+                        'fuzziness': 0.7,
+                        'fields': ['properties.{0}'.format(p)
+                                   for p in text_properties]}}})
+        else:
+            query['query']['bool'].update({
+                'should': {
+                    'match_all': {}}})
+
+        if self.opts['type']:
+            query['query']['bool'].update({
+                'filter': {
+                    'term': {
+                        'origin.resource.name': self.opts['type']}}})
 
         return query
 
@@ -170,38 +186,51 @@ class Plugin(AbstractPlugin):
 
             def update_summary(parent, e, name, **attrs):
                 if name not in (k['@name'] for k in self._summary[parent][e]):
-                    res = {'@name': name, '@count': '1'}
+                    res = {'@name': name, '@count': '0'}
                     for k, v in attrs.items():
                         res['@{0}'.format(k)] = v
                     self._summary[parent][e].append(res)
 
                 for d in self._summary[parent][e]:
                     if d['@name'] == name:
-                        d['@count'] = int(d['@count'])
-                        d['@count'] += 1
-                        d['@count'] = str(d['@count'])
+                        d['@count'] = str(int(d['@count']) + 1)
                         break
 
             # categories/category
-            for val in data['info']['category']:
-                if isinstance(val, str):
-                    update_summary('categories', 'category', val,
-                                   label=dict(self.CATEGORIES)[val])
-                if isinstance(val, dict):
-                    if '$' in val and val['$']:
-                        update_summary('categories', 'category', val['$'],
-                                       label=dict(self.CATEGORIES)[val['$']])
+            category = data['info']['category']
+            if isinstance(category, str):
+                update_summary(
+                    'categories', 'category', category,
+                    label=dict(self.CATEGORIES).get(category, category))
+
+            if isinstance(category, list):
+                for val in category:
+                    if isinstance(val, str):
+                        update_summary(
+                            'categories', 'category', val,
+                            label=dict(self.CATEGORIES).get(val, val))
+                    if isinstance(val, dict):
+                        if '$' in val and val['$']:
+                            update_summary(
+                                'categories', 'category', val['$'],
+                                label=dict(self.CATEGORIES).get(val['$'], val['$']))
 
             # createDateYears/createDateYear
-            val = data['info']['createDate']
-            date = datetime.strptime(val, '%Y-%m-%dT%H:%M:%S')
+            create_date = data['info']['createDate']
+            date = datetime.strptime(create_date, '%Y-%m-%dT%H:%M:%S')
             update_summary('createDateYears', 'createDateYear', str(date.year))
 
             # denominators/denominator
-            # TODO
+            # TODO: impossible ???
 
             # formats/format
-            # TODO
+            if 'format' in data and data['format']:
+                data_format = data['format']
+                if isinstance(data_format, str):
+                    update_summary('formats', 'format', data_format)
+                if isinstance(data_format, list):
+                    for val in data_format:
+                        update_summary('formats', 'format', val)
 
             def update_keyword(val):
                 update_summary('keywords', 'keyword', val)
@@ -210,128 +239,149 @@ class Plugin(AbstractPlugin):
                     update_summary('inspireThemes', 'inspireTheme', val)
 
                     # inspireThemesWithAc/inspireThemeWithAc
-                    ac = dict((m[1], m[0]) for m in self.INSPIRE_THEME)[val]
+                    ac = dict((m[1], m[0]) for m in self.INSPIRE_THEME).get(val, val)
                     update_summary('inspireThemesWithAc',
                                    'inspireThemeWithAc',
                                    '{0}|{1}'.format(ac, val))
 
             # keywords/keyword
-            if isinstance(data['keyword'], str):
-                update_keyword(data['keyword'])
-            if isinstance(data['keyword'], list):
-                for keyword in data['keyword']:
+            if 'keyword' in data and data['keyword']:
+                keyword = data['keyword']
+                if isinstance(keyword, str):
                     update_keyword(keyword)
+                if isinstance(keyword, list):
+                    for k in keyword:
+                        update_keyword(k)
 
             # licence/useLimitation
-            for sub in data['LegalConstraints']:
-                if isinstance(sub, dict):
-                    if sub['@preformatted'] == 'true':
-                        continue
-                    for k in ('useLimitation', 'otherConstraints'):
-                        if k not in sub:
+            if 'LegalConstraints' in data and data['LegalConstraints']:
+                for sub in data['LegalConstraints']:
+                    if isinstance(sub, dict):
+                        if sub['@preformatted'] == 'true':
                             continue
-                        val = sub[k]['CharacterString']
-                        # if not re.match('^(\w+\s*)+$', val):
-                        #     continue
+                        for k in ('useLimitation', 'otherConstraints'):
+                            if k not in sub:
+                                continue
+                            val = sub[k]['CharacterString']
+                            if not re.match('^(\w+\s*)+$', val):
+                                continue
+                            update_summary('licence', 'useLimitation', val)
+
+            # rights == licence/useLimitation
+            if 'rights' in data and data['rights']:
+                rights = data['rights']
+                if isinstance(rights, str):
+                    update_summary('licence', 'useLimitation', rights)
+                if isinstance(rights, list):
+                    for val in rights:
                         update_summary('licence', 'useLimitation', val)
 
             # maintenanceAndUpdateFrequencies/maintenanceAndUpdateFrequency
-            # TODO
+            # TODO: impossible ???
 
             # orgNames/orgName
-            for val in data['responsibleParty']:
-                if isinstance(val, dict) and 'organisationName' in val:
-                    update_summary('orgNames', 'orgName',
-                                   val['organisationName'])
+            if 'responsibleParty' in data and data['responsibleParty']:
+                for val in data['responsibleParty']:
+                    if isinstance(val, dict) and 'organisationName' in val:
+                        update_summary('orgNames', 'orgName',
+                                       val['organisationName'])
+
+            # publisher == orgNames/orgName
+            if 'publisher' in data and data['publisher']:
+                publisher = data['publisher']
+                if isinstance(publisher, str):
+                    update_summary('orgNames', 'orgName', publisher)
+                if isinstance(publisher, list):
+                    for val in publisher:
+                        update_summary('orgNames', 'orgName', val)
 
             # resolutions/resolution
-            # TODO
+            # TODO: impossible ???
 
             # serviceTypes/serviceType
-            # TODO
+            # TODO: impossible ???
 
             # spatialRepresentationTypes/spatialRepresentationType
-            # TODO
+            # TODO: impossible ???
 
             # status/status
-            # TODO
+            # TODO: impossible ???
 
             # types/type
             resource_type = hit['_source']['origin']['resource']['name']
-            update_summary('types', 'type', resource_type,
-                           label=dict(self.TYPE)[resource_type])
+            update_summary(
+                'types', 'type', resource_type,
+                label=dict(self.TYPE).get(resource_type, resource_type))
 
         # End update_metadata()
 
-        if not self.opts['any']:
-            body = {'from': self.opts['from'],
-                    'size': self.opts['to'] - self.opts['from'] + 1,
+        # if not self.opts['any'] and not self.opts['type']:
+        #     body = {'from': self.opts['from'],
+        #             'size': self.opts['to'] - self.opts['from'] + 1,
+        #             'query': {
+        #                 'bool': {
+        #                     'filter': [{
+        #                         'term': {
+        #                             'origin.source.type': 'geonet'}}],
+        #                     'must': [{
+        #                         'match_all': {}}]}}}
+        #
+        #     res = elastic_conn.search(index=self.INDEX, body=body)
+        #     for hit in res['hits']['hits']:
+        #         update_metadata(hit)
+        #         count += 1
+        #
+        # else:
+        uuid_list = []
+        for bucket in data['aggregations']['metadata']['buckets']:
+            try:
+                # Il serait peut-être plus élégant d'effectuer ce parsing
+                # dans le script painless envoyée à Elasticsearch au
+                # moment de la requête (Cf. ligne 105)
+                uuid = dict(parse_qsl(urlparse(bucket['key']).query))['ID']
+            except Exception:
+                uuid = bucket['key']
+            # Et de gérer les doublons au moment même de la requête...
+            if uuid not in uuid_list:
+                # Pas de doublon, l'ordre du score est conservé,
+                # il n'est donc pas nécesssaire de le vérifier ici.
+                uuid_list.append(uuid)
+
+        for i, uuid in enumerate(uuid_list):
+            if i < self.opts['from']:
+                continue
+            if i > self.opts['to']:
+                break
+
+            body = {'_source': ['raw_data', 'origin.resource.name'],
                     'query': {
-                        'bool': {
-                            'filter': [{
-                                'term': {
-                                    'origin.source.type': 'geonet'}}],
-                            'must': [{
-                                'match_all': {}}]}}}
+                        'match': {
+                            'origin.uuid': uuid}}}
 
             res = elastic_conn.search(index=self.INDEX, body=body)
-            for hit in res['hits']['hits']:
-                update_metadata(hit)
-                count += 1
 
-        else:
-            uuid_list = []
-            for bucket in data['aggregations']['metadata']['buckets']:
-                try:
-                    # Il serait peut-être plus élégant d'effectuer ce parsing
-                    # dans le script painless envoyée à Elasticsearch au
-                    # moment de la requête (Cf. ligne 105)
-                    uuid = dict(parse_qsl(urlparse(bucket['key']).query))['ID']
-                except:
-                    uuid = bucket['key']
-                # Et de gérer les doublons au moment même de la requête...
-                if uuid not in uuid_list:
-                    # Pas de doublon, l'ordre du score est conservé,
-                    # il n'est donc pas nécesssaire de le vérifier ici.
-                    uuid_list.append(uuid)
+            if len(res['hits']['hits']) == 0:
+                continue
+            if len(res['hits']['hits']) > 1:
+                import warnings
+                warnings.warn('Duplicate UUID.')
+                # Ce cas ne devrait JAMAIS arriver...
+                # Par défaut, on retourne uniquement le premier élément
 
-            for i, uuid in enumerate(uuid_list):
-                if i < self.opts['from']:
-                    continue
-                if i > self.opts['to']:
-                    break
-
-                body = {'_source': [
-                            'raw_data',
-                            'origin.resource.name'],
-                        'query': {
-                            'match': {
-                                'origin.uuid': uuid}}}
-
-                res = elastic_conn.search(index=self.INDEX, body=body)
-
-                if len(res['hits']['hits']) == 0:
-                    continue
-                if len(res['hits']['hits']) > 1:
-                    import warnings
-                    warnings.warn('Duplicate UUID.')
-                    # Ce cas ne devrait JAMAIS arriver...
-                    # Par défaut, on retourne uniquement le premier élément
-
-                hit = res['hits']['hits'][0]
-                update_metadata(hit)
-                count += 1
+            hit = res['hits']['hits'][0]
+            update_metadata(hit)
+            count += 1
+        # End else
 
         self._summary['@count'] = str(count)
 
-        data = {'response': {
-                    '@from': str(self.opts['from']),
-                    '@to': str(self.opts['to']),
-                    'metadata': metadata,
-                    'summary': self._summary}}
+        data = {'response': {'@from': str(self.opts['from']),
+                             '@to': str(self.opts['to']),
+                             'metadata': metadata,
+                             'summary': self._summary}}
 
-        return HttpResponse(
-                    ObjToXML(data).tostring(), content_type='application/xml')
+        return HttpResponse(ObjToXML(data).tostring(),
+                            content_type='application/xml')
 
 
 plugin = Plugin
