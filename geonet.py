@@ -3,8 +3,11 @@ from ..elasticsearch_wrapper import elastic_conn
 from datetime import datetime
 from django.http import HttpResponse
 from neogeo_xml_utils import ObjToXML
+from neogeo_xml_utils import XMLToObj
 from pathlib import Path
 import re
+from requests.auth import HTTPBasicAuth
+from requests import get
 from urllib.parse import parse_qsl
 from urllib.parse import urlparse
 
@@ -63,20 +66,29 @@ class Plugin(AbstractPlugin):
                   ('transport', 'Transport'),
                   ('urbanisme', 'Urbanisme'))
 
-    def __init__(self, config, contexts):
-        super().__init__(config, contexts)
+    def __init__(self, config, contexts, **kwargs):
+        super().__init__(config, contexts, **kwargs)
 
         self.qs = [('any', 'Texte à rechercher', 'string'),
+                   ('category', 'Filtrer par catégorie', 'string'),
+                   ('conditionapplyingtoaccessanduse', "Filtrer par condition d'accès", 'string'),
+                   # ('extended', '', 'string'),
+                   # ('hitsperpage', '', 'interger'),
+                   # ('similarity', '', 'interger'),
                    ('fast', "Activer le mode 'fast'", 'boolean'),
                    ('from', 'Index du premier document retourné', 'integer'),
+                   ('orgname', 'Filtrer par organisme producteur', 'string'),
                    ('to', 'Index du dernier document retourné', 'interger'),
-                   ('type', 'Filtrer sur le type de resource', 'string')]
+                   # ('sortby', 'Trier par...', 'string'),
+                   ('type', 'Filtrer le type de resource', 'string'),
+                   ('updatefrequency', 'Filtrer par fréquence de mise à jour', 'string')]
 
-        self.opts = {'any': '',
-                     'fast': False,
-                     'from': self.FROM,
-                     'to': self.TO,
-                     'type': None}
+        self.opts = dict((e[0], None) for e in self.qs)
+        self.opts.update({'any': '',
+                          'fast': False,
+                          'from': self.FROM,
+                          'to': self.TO,
+                          'type': None})
 
         self._summary = {'categories': {'category': []},
                          'createDateYears': {'createDateYear': []},
@@ -96,17 +108,40 @@ class Plugin(AbstractPlugin):
                          'status': {'status': []},
                          'types': {'type': []}}
 
+        for context in self.contexts:
+            if context.resource.source.mode == 'geonet':
+                parsed = urlparse(context.resource.source.uri)
+                url = '{0}://{1}/catalogue/srv/fre/q'.format(
+                    parsed.scheme, parsed.netloc.split('@')[-1])
+                break
+
+        auth = ('user' in kwargs and kwargs['user'] and 'password' in kwargs and kwargs['password']) \
+            and HTTPBasicAuth(kwargs['user'], kwargs['password']) or None
+
+        r = get(url, auth=auth)
+        if not r.status_code == 200:
+            r.raise_for_status()
+        data = XMLToObj(r.text, with_ns=False).data
+        self.allowed_uuid = [
+            meta['info']['uuid'] for meta in data['response']['metadata']]
+
     def input(self, **params):
 
         text_properties = ()
+        keyword_properties = ()
         for _, columns in self.columns_by_index.items():
             for typ, col in group_by(columns, i=1).items():
                 if typ == 'text':
                     text_properties += col
+                if typ == 'keyword':
+                    keyword_properties += col
 
-        self.opts['any'] = ('any' in params) and params['any'] or None
-        self.opts['fast'] = ('fast' in params and params['fast'] != 'false')
-        self.opts['type'] = ('type' in params) and params['type'] or None
+        for m in (e[0] for e in self.qs):
+            if m in ('from', 'to'):
+                continue
+            if m == 'fast':
+                self.opts[m] = (m in params and params[m] != 'false')
+            self.opts[m] = (m in params) and params[m] or None
 
         try:
             self.opts['from'] = int(params['from'])
@@ -129,7 +164,8 @@ class Plugin(AbstractPlugin):
         query = {
             'size': 0,
             'query': {
-                'bool': {}},
+                'bool': {
+                    'filter': []}},
             'aggs': {
                 'metadata': {
                     'aggs': {
@@ -159,10 +195,57 @@ class Plugin(AbstractPlugin):
                     'match_all': {}}})
 
         if self.opts['type']:
-            query['query']['bool'].update({
-                'filter': {
+            query['query']['bool']['filter'].append({
+                'term': {
+                    'origin.resource.name': self.opts['type']}})
+
+        if self.opts['category']:
+            if 'category' in keyword_properties:
+                query['query']['bool']['filter'].append({
                     'term': {
-                        'origin.resource.name': self.opts['type']}}})
+                        'properties.category': self.opts['category']}})
+            if 'category' in text_properties:
+                query['query']['bool']['filter'].append({
+                    'term': {
+                        'properties.category.keyword': self.opts['category']}})
+
+        if self.opts['conditionapplyingtoaccessanduse']:
+            if 'rights' in keyword_properties:
+                query['query']['bool']['filter'].append({
+                    'term': {
+                        'properties.rights': self.opts['conditionapplyingtoaccessanduse']}})
+            if 'rights' in text_properties:
+                query['query']['bool']['filter'].append({
+                    'term': {
+                        'properties.rights.keyword': self.opts['conditionapplyingtoaccessanduse']}})
+
+        if self.opts['orgname']:
+            if 'publisher' in keyword_properties:
+                query['query']['bool']['filter'].append({
+                    'term': {
+                        'properties.publisher': self.opts['orgname']}})
+            if 'publisher' in text_properties:
+                query['query']['bool']['filter'].append({
+                    'term': {
+                        'properties.publisher.keyword': self.opts['orgname']}})
+
+        if self.opts['updatefrequency']:
+            if 'updateFrequency' in keyword_properties:
+                query['query']['bool']['filter'].append({
+                    'term': {
+                        'properties.updateFrequency': self.opts['updatefrequency']}})
+            if 'updateFrequency' in keyword_properties:
+                query['query']['bool']['filter'].append({
+                    'term': {
+                        'properties.updateFrequency.keyword': self.opts['updatefrequency']}})
+
+        # if self.opts['sortby']:
+        #     prop = self.opts['sortby']
+        #     sort = 'asc'
+        #     if prop.startswith('-'):
+        #         prop = prop[1:]
+        #         sort = 'desc'
+        #     query['sort'] = {'properties.{0}'.format(prop): sort}
 
         return query
 
@@ -315,23 +398,6 @@ class Plugin(AbstractPlugin):
 
         # End update_metadata()
 
-        # if not self.opts['any'] and not self.opts['type']:
-        #     body = {'from': self.opts['from'],
-        #             'size': self.opts['to'] - self.opts['from'] + 1,
-        #             'query': {
-        #                 'bool': {
-        #                     'filter': [{
-        #                         'term': {
-        #                             'origin.source.type': 'geonet'}}],
-        #                     'must': [{
-        #                         'match_all': {}}]}}}
-        #
-        #     res = elastic_conn.search(index=self.INDEX, body=body)
-        #     for hit in res['hits']['hits']:
-        #         update_metadata(hit)
-        #         count += 1
-        #
-        # else:
         uuid_list = []
         for bucket in data['aggregations']['metadata']['buckets']:
             try:
@@ -341,10 +407,13 @@ class Plugin(AbstractPlugin):
                 uuid = dict(parse_qsl(urlparse(bucket['key']).query))['ID']
             except Exception:
                 uuid = bucket['key']
+
             # Et de gérer les doublons au moment même de la requête...
             if uuid not in uuid_list:
                 # Pas de doublon, l'ordre du score est conservé,
                 # il n'est donc pas nécesssaire de le vérifier ici.
+                if uuid not in self.allowed_uuid:
+                    continue
                 uuid_list.append(uuid)
 
         for i, uuid in enumerate(uuid_list):
