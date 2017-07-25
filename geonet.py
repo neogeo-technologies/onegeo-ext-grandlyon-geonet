@@ -108,22 +108,25 @@ class Plugin(AbstractPlugin):
                          'status': {'status': []},
                          'types': {'type': []}}
 
+        self.allowed_uuid = []
         for context in self.contexts:
             if context.resource.source.mode == 'geonet':
                 parsed = urlparse(context.resource.source.uri)
                 url = '{0}://{1}/catalogue/srv/fre/q'.format(
                     parsed.scheme, parsed.netloc.split('@')[-1])
+
+                auth = ('user' in kwargs and kwargs['user']
+                        and 'password' in kwargs and kwargs['password']) \
+                    and HTTPBasicAuth(kwargs['user'], kwargs['password']) or None
+
+                r = get(url, auth=auth)
+                if not r.status_code == 200:
+                    r.raise_for_status()
+                data = XMLToObj(r.text, with_ns=False).data
+                self.allowed_uuid = [
+                    meta['info']['uuid']
+                    for meta in data['response']['metadata']]
                 break
-
-        auth = ('user' in kwargs and kwargs['user'] and 'password' in kwargs and kwargs['password']) \
-            and HTTPBasicAuth(kwargs['user'], kwargs['password']) or None
-
-        r = get(url, auth=auth)
-        if not r.status_code == 200:
-            r.raise_for_status()
-        data = XMLToObj(r.text, with_ns=False).data
-        self.allowed_uuid = [
-            meta['info']['uuid'] for meta in data['response']['metadata']]
 
     def input(self, **params):
 
