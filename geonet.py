@@ -349,7 +349,7 @@ class Plugin(AbstractPlugin):
                             if k not in sub:
                                 continue
                             val = sub[k]['CharacterString']
-                            if not re.match('^(\w+\s*)+$', val):
+                            if not re.match('^(?:(?!http).)*$', val):
                                 continue
                             update_summary('licence', 'useLimitation', val)
 
