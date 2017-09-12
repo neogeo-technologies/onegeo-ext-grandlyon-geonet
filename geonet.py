@@ -448,7 +448,7 @@ class Plugin(AbstractPlugin):
         self._summary['@count'] = str(count)
 
         data = {'response': {'@from': str(self.opts['from']),
-                             '@to': str(self.opts['to']),
+                             '@to': str(self.opts['from'] + count - 1),
                              'metadata': metadata,
                              'summary': self._summary}}
 
